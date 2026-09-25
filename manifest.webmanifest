@@ -1,0 +1,14 @@
+{
+  "name": "澄音 · 免费无损音乐",
+  "short_name": "澄音",
+  "description": "只收录授权明确的免费无损音乐：现场录音、独立厂牌、古典音乐。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0d0f14",
+  "theme_color": "#0d0f14",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

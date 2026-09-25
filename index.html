@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<title>澄音</title>
+<meta name="description" content="只收录授权明确的免费无损音乐：现场录音、独立厂牌、古典音乐。">
+<meta name="theme-color" content="#0d0f14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="澄音">
+<link rel="apple-touch-icon" href="icons/icon-180.png">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header class="top" id="top"></header>
+  <main id="view"></main>
+
+  <div class="mini hidden" id="mini">
+    <div class="mini-prog"><i id="miniBar"></i></div>
+    <img id="miniCover" alt="">
+    <div class="mini-t"><b id="miniTitle"></b><small id="miniArtist"></small></div>
+    <button class="mini-btn" id="miniPlay" aria-label="播放/暂停"></button>
+    <button class="mini-btn" id="miniNext" aria-label="下一首"></button>
+  </div>
+
+  <nav class="tabs" id="tabs">
+    <button data-tab="discover" class="on"><i data-ic="compass"></i><span>发现</span></button>
+    <button data-tab="saved"><i data-ic="download"></i><span>已下载</span></button>
+    <button data-tab="queue"><i data-ic="list"></i><span>队列</span></button>
+    <button data-tab="settings"><i data-ic="gear"></i><span>设置</span></button>
+  </nav>
+</div>
+
+<section class="np hidden" id="np">
+  <div class="np-bg" id="npBg"></div>
+  <div class="np-inner">
+    <button class="np-down" id="npDown" aria-label="收起"></button>
+    <div class="np-stage">
+      <img class="np-cover" id="npCover" alt="">
+      <div class="np-lyrics hidden" id="npLyrics"></div>
+    </div>
+    <div class="np-meta">
+      <h2 id="npTitle"></h2>
+      <p id="npArtist"></p>
+      <span class="np-q" id="npQ"></span>
+    </div>
+    <div class="np-seek">
+      <input type="range" id="npSeek" min="0" max="1000" value="0">
+      <div class="np-times"><span id="npPos">0:00</span><span id="npDur">0:00</span></div>
+    </div>
+    <div class="np-ctrls">
+      <button id="npRepeat" class="sm" aria-label="循环"></button>
+      <button id="npPrev" aria-label="上一首"></button>
+      <button id="npPlay" class="big" aria-label="播放/暂停"></button>
+      <button id="npNext" aria-label="下一首"></button>
+      <button id="npLyr" class="sm" aria-label="歌词"></button>
+    </div>
+  </div>
+</section>
+
+<div id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
