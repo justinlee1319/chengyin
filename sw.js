@@ -1,6 +1,6 @@
 /* Service Worker：没网也能打开 App；专辑封面缓存起来，离线时锁屏 / CarPlay 也有封面。
  * 音频文件不经过这里（下载的歌由 app.js 存在 cy-tracks-v1 里）。 */
-const SHELL = 'cy-shell-v2';
+const SHELL = 'cy-shell-v3';
 const COVERS = 'cy-covers-v1';
 const FILES = ['./', 'index.html', 'style.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];

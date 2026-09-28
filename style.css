@@ -117,6 +117,23 @@ main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4p
 .tag.ll { color: #9fb4e8; background: rgba(120,150,230,.13); }
 .tag.lossy { color: var(--muted); background: #22262f; }
 
+/* 电台 */
+.sub-chips { margin-top: -2px; }
+.sub-chips .chip { padding: 6px 12px; font-size: 13px; }
+.sub-chips .chip.on { background: var(--gold-soft); color: var(--gold); border-color: rgba(230,184,101,.45); }
+.st-row { display: flex; align-items: center; gap: 12px; padding: 10px 2px; border-bottom: 1px solid #1a1e27; }
+.st-ic { position: relative; width: 48px; height: 48px; border-radius: 10px; overflow: hidden; background: var(--card-hi); flex: none; }
+.st-ic .ph { position: absolute; inset: 0; display: grid; place-items: center; color: #4a5268; font-size: 22px; }
+.st-ic img { position: relative; width: 100%; height: 100%; object-fit: contain; background: #fff; }
+.st-row .tt { flex: 1; min-width: 0; }
+.st-row .tt b { display: block; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.st-row .tt small { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; margin-top: 3px; white-space: nowrap; overflow: hidden; }
+.st-row.playing .tt b { color: var(--gold); }
+.st-row .fav { width: 40px; height: 40px; font-size: 22px; color: var(--dim); flex: none; }
+.st-row .fav.on { color: var(--gold); }
+.np.live .np-seek input { opacity: .35; }
+.np.live .np-times span:last-child { color: var(--red); font-weight: 600; }
+
 /* 设置 */
 .group { background: var(--card); border-radius: 14px; margin-bottom: 16px; overflow: hidden; }
 .group h3 { font-size: 13px; color: var(--muted); font-weight: 500; margin: 18px 4px 8px; }

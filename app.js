@@ -3,7 +3,7 @@
  * 手机直接连 archive.org / Jamendo / LRCLIB（都支持跨域），不需要 PC。
  * 下载的歌存在 Cache Storage，离线可播；歌曲信息通过 Media Session 交给系统，CarPlay / 锁屏可以显示和控制。
  */
-const VERSION = '0.2.0';
+const VERSION = '0.3.0';
 const TRACK_CACHE = 'cy-tracks-v1';
 
 /* ---------------- 工具 ---------------- */
@@ -63,6 +63,7 @@ const saveLib = () => save('cy.lib', lib);
 
 /* ---------------- 音源 ---------------- */
 const SOURCES = [
+  { id: 'radio', name: '电台', ph: '搜电台名，如 音乐之声、动感101、Jazz' },
   { id: 'lma', name: '现场录音', ph: '搜乐队，如 John Mayer、Grateful Dead', q: 'collection:etree',
     note: 'Live Music Archive：乐队允许录音并非商业交换' },
   { id: 'netlabels', name: '独立厂牌', ph: '搜艺人 / 专辑 / 风格', q: 'collection:netlabels', note: 'Creative Commons 授权' },
@@ -114,7 +115,7 @@ async function iaAlbum(id) {
   const artist = first(md.creator), title = first(md.title) || id;
   const cover = `https://archive.org/services/img/${id}`;
   const coll = [].concat(md.collection || []);
-  const src = coll.includes('etree') ? SOURCES[0] : coll.includes('netlabels') ? SOURCES[1] : SOURCES[2];
+  const src = SOURCES.find(s => s.id === (coll.includes('etree') ? 'lma' : coll.includes('netlabels') ? 'netlabels' : 'classical'));
   return {
     key: 'ia:' + id, id, title, artist, cover, date: String(first(md.date)).slice(0, 10), venue: first(md.venue),
     license: first(md.licenseurl), note: src.note, page: `https://archive.org/details/${id}`,
@@ -145,6 +146,100 @@ async function jamendoSearch(q, page) {
     }),
   };
 }
+
+/* ---------------- 电台 ----------------
+ * 目录来自 Radio Browser（开放的全球电台数据库）；电台版权由电台自己负责，这里只是播放它们公开的直播流。
+ * 手机版页面是 https，iOS 会拦截 http 的音频流，所以只列 https 的电台。 */
+const probeEl = document.createElement('audio');
+const CAN_OGG_FLAC = !!probeEl.canPlayType('audio/ogg; codecs="flac"');
+const CAN_OGG = !!probeEl.canPlayType('audio/ogg');
+const CAN_FLAC = !!probeEl.canPlayType('audio/flac');
+const RP = 'https://stream.radioparadise.com/';
+// 无损精选：Radio Paradise 的 FLAC 是 Ogg 封装，手机不支持时自动换成它官方的 AAC 320k
+const LOSSLESS_RADIO = [
+  { name: 'Radio Paradise · 主频道', desc: '摇滚 / 流行 / 民谣 / 电子混搭，无广告', flac: RP + 'flac', alt: RP + 'aac-320' },
+  { name: 'Radio Paradise · Mellow', desc: '舒缓、适合开车', flac: RP + 'mellow-flac', alt: RP + 'mellow-320' },
+  { name: 'Radio Paradise · Rock', desc: '摇滚', flac: RP + 'rock-flac', alt: RP + 'rock-320' },
+  { name: 'Radio Paradise · Global', desc: '世界音乐', flac: RP + 'global-flac', alt: RP + 'global-320' },
+  { name: 'Radio Paradise · Serenity', desc: '氛围 / 冥想', flac: RP + 'serenity-flac' },
+  { name: 'Rondo Classic · Klasu', desc: '古典（芬兰）', flac: 'https://iradio.fi/klasu.flac', alt: 'https://iradio.fi/klasu-hi.mp3', raw: true },
+  { name: 'Rondo Classic · Klasu Pro', desc: '古典，无主持人', flac: 'https://iradio.fi/klasupro.flac', raw: true },
+];
+const RADIO_CATS = [
+  { id: 'lossless', name: '无损精选' },
+  { id: 'cn', name: '华语音乐', music: true, queries: [{ countrycode: 'CN' }, { countrycode: 'TW' }, { countrycode: 'HK' },
+    { tag: 'cpop' }, { tag: 'mandopop' }, { tag: 'cantopop' }] },
+  { id: 'west', name: '欧美流行', countries: ['US', 'GB', 'CA', 'AU', 'IE', 'NZ'],
+    queries: [{ tag: 'top 40' }, { tag: 'pop', countrycode: 'US' }, { tag: 'pop', countrycode: 'GB' }, { tag: 'hits', countrycode: 'US' }] },
+  { id: 'jazz', name: '爵士', queries: [{ tag: 'jazz' }] },
+  { id: 'classical', name: '古典', queries: [{ tag: 'classical' }] },
+  { id: 'chill', name: '轻音乐', queries: [{ tag: 'chillout' }, { tag: 'lounge' }, { tag: 'relax' }] },
+  { id: 'fav', name: '★ 收藏' },
+];
+const MUSIC_RE = /music|音乐|pop|流行|歌|经典|怀旧|oldies|粤语|金曲|hits|mandopop|cantopop|c-?pop|轻音乐/i;
+const NOT_MUSIC_RE = /news|新闻|伴音|\btv\b|cctv|资讯|talk|交通|体育|经济|故事|戏曲|评书|相声|财经/i;
+const radioFav = load('cy.radioFav', {});
+const saveFav = () => save('cy.radioFav', radioFav);
+
+let RB = null;
+async function rbBase() {
+  if (RB) return RB;
+  try {
+    const names = [...new Set((await getJSON('https://all.api.radio-browser.info/json/servers')).map(s => s.name))];
+    RB = 'https://' + names[Math.floor(Math.random() * names.length)];
+  } catch { RB = 'https://de1.api.radio-browser.info'; }
+  return RB;
+}
+async function rbSearch(params) {
+  const p = new URLSearchParams({ hidebroken: 'true', order: 'clickcount', reverse: 'true', limit: '150', ...params });
+  try { return await getJSON((await rbBase()) + '/json/stations/search?' + p); }
+  catch (e) { RB = null; throw e; }
+}
+function playableOnPhone(s) {
+  const u = s.url_resolved || s.url || '';
+  if (!u.startsWith('https:')) return false;
+  if (s.codec === 'OGG') return CAN_OGG;
+  if (s.codec === 'FLAC') return CAN_FLAC;
+  return true;
+}
+function fromRB(s) {
+  const tags = (s.tags || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 2);
+  const codec = s.codec && s.codec !== 'UNKNOWN' ? s.codec : '';
+  return { title: (s.name || '').trim(), artist: [s.countrycode, ...tags].filter(Boolean).join(' · '), album: '电台',
+    cover: s.favicon || '', url: s.url_resolved, live: true, radio: true, codec, bitrate: s.bitrate || 0,
+    uuid: s.stationuuid, lossless: s.codec === 'FLAC', score: (s.clickcount || 0) + (s.votes || 0) / 10 };
+}
+function curatedStations() {
+  return LOSSLESS_RADIO.map(c => {
+    const ok = c.raw ? CAN_FLAC : CAN_OGG_FLAC;
+    const url = ok ? c.flac : c.alt;
+    if (!url) return null;
+    return { title: c.name, artist: c.desc, album: '电台', cover: 'icons/icon-512.png', url, live: true, radio: true,
+      lossless: url === c.flac, codec: url === c.flac ? 'FLAC' : (url.endsWith('.mp3') ? 'MP3' : 'AAC'), bitrate: url === c.flac ? 0 : 320 };
+  }).filter(Boolean);
+}
+async function radioList(catId) {
+  const cat = RADIO_CATS.find(c => c.id === catId);
+  if (catId === 'lossless') return curatedStations();
+  if (catId === 'fav') return Object.values(radioFav);
+  const rows = (await Promise.all(cat.queries.map(q => rbSearch(q).catch(() => [])))).flat();
+  return dedupeStations(rows.filter(s => playableOnPhone(s) && (!cat.countries || cat.countries.includes(s.countrycode)) && (!cat.music ||
+    (MUSIC_RE.test(s.tags + ' ' + s.name) && !NOT_MUSIC_RE.test(s.tags + ' ' + s.name))))).slice(0, 80);
+}
+async function radioSearch(q) {
+  return dedupeStations((await rbSearch({ name: q, limit: '100' })).filter(playableOnPhone)).slice(0, 60);
+}
+function dedupeStations(rows) {
+  const seen = new Set(), out = [];
+  for (const s of rows.map(fromRB).sort((a, b) => b.score - a.score)) {
+    const k1 = s.url, k2 = s.title.toLowerCase().replace(/\s+/g, '');
+    if (seen.has(k1) || seen.has(k2)) continue;
+    seen.add(k1); seen.add(k2); out.push(s);
+  }
+  return out;
+}
+// Radio Browser 请客户端在播放时报告一次点击，用来统计热门度
+function rbClick(t) { if (t.uuid) rbBase().then(b => fetch(`${b}/json/url/${t.uuid}`)).catch(() => {}); }
 
 const lyrCache = {};
 async function lrclib(t) {
@@ -301,6 +396,10 @@ function makeSilence() {
 const SILENCE = makeSilence();
 
 async function srcFor(t) {
+  if (t.live) {
+    if (settings.offlineOnly) throw new Error('电台要用流量（设置里开了"只播已下载"）');
+    return t.url;
+  }
   if (lib.saved[t.url]) {
     const r = await (await caches.open(TRACK_CACHE)).match(t.url);
     if (r) return URL.createObjectURL(new Blob([await r.blob()], { type: mimeOf(t.url) }));
@@ -357,11 +456,12 @@ async function playAt(i, startAt = 0) {
   other().pause();
   setElSrc(cur, src);
   P.resumeAt = 0;
+  if (t.live) { startAt = 0; rbClick(t); }
   if (startAt > 1) audio.addEventListener('loadedmetadata', () => { audio.currentTime = startAt; }, { once: true });
   log(`播放 #${i}《${t.title}》${src.startsWith('blob:') ? '（离线）' : '（在线）'}`);
   try { await audio.play(); } catch (e) {
     log(`play() 被拒绝：${e.name} ${e.message}`);
-    if (e.name !== 'AbortError') toast('播放失败：' + e.message, true);
+    if (e.name !== 'AbortError' && !t.live) toast('播放失败：' + e.message, true); // 电台失败由 error 事件统一处理
   }
   prepareNext();
   saveState();
@@ -373,6 +473,8 @@ async function prepareNext() {
   P.ready = null;
   if (n === null || n === P.idx) return;
   const t = P.queue[n];
+  // 电台是直播：不预先连接下一个台（白白耗流量），切台时再连
+  if (t.live || P.queue[P.idx]?.live) return;
   let src;
   try { src = await srcFor(t); } catch { return; } // 没下载且开了只播已下载：到时候再提示
   if (nextIndex(true) !== n || P.ready) { if (src.startsWith('blob:')) URL.revokeObjectURL(src); return; }
@@ -428,6 +530,13 @@ function maybeEarlySwitch() {
 A.forEach(el => {
   el.addEventListener('ended', () => {
     if (el !== audio || P.curSrc === SILENCE) return;
+    const t = P.queue[P.idx];
+    if (t && t.live) { // 直播流断了（网络波动 / 电台重启）：重新连同一个台
+      log('电台断流，重连');
+      el.src = P.curSrc;
+      el.play().catch(e => log('电台重连失败：' + e.name));
+      return;
+    }
     log('这首播完了（ended）');
     advance('播完');
   });
@@ -435,8 +544,18 @@ A.forEach(el => {
     if (el !== audio || !P.curSrc || P.curSrc === SILENCE) return;
     const t = P.queue[P.idx];
     log(`播放出错 code=${el.error && el.error.code}`);
+    if (t && t.live) { // 电台失效很常见：开车时自动换下一个台，连续失败 3 个就停
+      P.radioFails = (P.radioFails || 0) + 1;
+      const n = nextIndex(false);
+      if (P.radioFails <= 3 && n !== null) {
+        toast(`「${t.title}」连不上，换下一个台`, true);
+        setTimeout(() => { if (P.queue[P.idx] === t) playAt(n); }, 1200);
+      } else toast(`「${t.title}」连不上，这个台可能已经失效`, true);
+      return;
+    }
     toast(`《${t ? t.title : ''}》播放出错，可能是网络问题`, true);
   });
+  el.addEventListener('playing', () => { if (el === audio) P.radioFails = 0; });
   el.addEventListener('pause', () => { if (el === audio && document.hidden && !el.ended) log('被暂停（后台）'); });
   el.addEventListener('stalled', () => { if (el === audio) log('网络卡住（stalled）'); });
 });
@@ -503,7 +622,8 @@ const S = {
   stacks: { discover: [], saved: [], queue: [], settings: [] }, // 每个标签页各自的返回栈
   get stack() { return this.stacks[this.tab]; },
   set stack(v) { this.stacks[this.tab] = v; },
-  d: { src: 'lma', q: '', hires: false, sort: 'downloads', items: [], total: 0, page: 1, loading: false, token: 0, err: null },
+  radio: { cat: 'lossless', q: '', list: [], loading: false, err: null, token: 0 },
+  d: { src: 'radio', q: '', hires: false, sort: 'downloads', items: [], total: 0, page: 1, loading: false, token: 0, err: null },
   jam: { q: '', tracks: [], total: 0, page: 1, loading: false, err: null },
   lyr: { key: null, lines: [], plain: '', cur: -1, loading: false },
 };
@@ -540,23 +660,84 @@ function renderDiscover(v) {
   const d = S.d, src = SOURCES.find(s => s.id === d.src);
   v.innerHTML = `
     <div class="chips">${SOURCES.map(s => `<button class="chip ${s.id === d.src ? 'on' : ''}" data-src="${s.id}">${s.name}</button>`).join('')}</div>
-    <div class="search">${IC.search}<input id="q" type="search" enterkeyhint="search" placeholder="${esc(src.ph)}" value="${esc(d.src === 'jamendo' ? S.jam.q : d.q)}"></div>
-    ${d.src !== 'jamendo' ? `<div class="opts">
+    <div class="search">${IC.search}<input id="q" type="search" enterkeyhint="search" placeholder="${esc(src.ph)}" value="${esc(d.src === 'jamendo' ? S.jam.q : d.src === 'radio' ? S.radio.q : d.q)}"></div>
+    ${d.src === 'radio' ? `<div class="chips sub-chips">${RADIO_CATS.map(c => `<button class="chip ${c.id === S.radio.cat && !S.radio.q ? 'on' : ''}" data-cat="${c.id}">${c.name}</button>`).join('')}</div>` : ''}
+    ${d.src !== 'jamendo' && d.src !== 'radio' ? `<div class="opts">
       <select id="sort"><option value="downloads">最热门</option><option value="date">最新</option><option value="rating">评分最高</option></select>
       <label class="toggle"><input type="checkbox" id="hr" ${d.hires ? 'checked' : ''}>只看 24bit</label></div>` : ''}
     <div id="res"></div>`;
-  $$('.chip', v).forEach(c => c.onclick = () => { if (d.src !== c.dataset.src) { d.src = c.dataset.src; d.items = []; d.err = null; renderDiscover(v); } });
+  $$('.chip[data-src]', v).forEach(c => c.onclick = () => { if (d.src !== c.dataset.src) { d.src = c.dataset.src; d.items = []; d.err = null; renderDiscover(v); } });
   const q = $('#q', v);
   q.onkeydown = e => {
     if (e.key !== 'Enter') return;
     q.blur();
-    if (d.src === 'jamendo') { S.jam.q = q.value.trim(); loadJam(true); } else { d.q = q.value.trim(); loadIA(true); }
+    if (d.src === 'jamendo') { S.jam.q = q.value.trim(); loadJam(true); }
+    else if (d.src === 'radio') { S.radio.q = q.value.trim(); renderDiscover(v); loadRadio(); }
+    else { d.q = q.value.trim(); loadIA(true); }
   };
+  if (d.src === 'radio') {
+    $$('.chip[data-cat]', v).forEach(c => c.onclick = () => { S.radio.cat = c.dataset.cat; S.radio.q = ''; renderDiscover(v); loadRadio(); });
+    if (!S.radio.list.length && !S.radio.err) loadRadio(); else drawRadio();
+    return;
+  }
   if (d.src === 'jamendo') { if (!S.jam.tracks.length && !S.jam.err) loadJam(true); else drawJam(); return; }
   $('#sort', v).value = d.sort;
   $('#sort', v).onchange = e => { d.sort = e.target.value; loadIA(true); };
   $('#hr', v).onchange = e => { d.hires = e.target.checked; loadIA(true); };
   if (!d.items.length && !d.err) loadIA(true); else drawIA();
+}
+
+async function loadRadio() {
+  const R = S.radio, token = ++R.token;
+  R.loading = true; R.err = null; R.list = []; drawRadio();
+  try {
+    const list = R.q ? await radioSearch(R.q) : await radioList(R.cat);
+    if (token !== R.token) return;
+    R.list = list;
+  } catch (e) { if (token === R.token) R.err = e.message; }
+  if (token !== R.token) return;
+  R.loading = false; drawRadio();
+}
+
+function drawRadio() {
+  const el = $('#res'); if (!el) return;
+  const R = S.radio;
+  if (R.loading) { el.innerHTML = '<div class="spinner"></div>'; return; }
+  if (R.err) { el.innerHTML = `<div class="empty"><b>电台目录连不上</b>${esc(R.err)}<br>检查网络后再试</div>`; return; }
+  if (!R.list.length) {
+    el.innerHTML = R.cat === 'fav' && !R.q
+      ? '<div class="empty"><b>还没有收藏</b>点电台右边的 ☆ 收藏，开车时直接从这里选</div>'
+      : '<div class="empty"><b>没有找到能在手机上播放的电台</b>换个关键词试试</div>';
+    return;
+  }
+  const note = R.q ? `搜索「${esc(R.q)}」` : R.cat === 'lossless'
+    ? (CAN_OGG_FLAC ? 'FLAC 无损直播（CD 音质），流量约 1GB/小时' : 'Radio Paradise 的 FLAC 这台手机放不了，已换成官方 AAC 320k；古典台是 FLAC 无损')
+    : '电台直播，音质通常为 64～128k，流量约 30～60MB/小时';
+  el.innerHTML = `<p class="sub" style="margin:0 0 6px">${note}</p>
+    <div class="stations">${R.list.map((s, i) => `
+      <div class="st-row" data-i="${i}" data-url="${esc(s.url)}">
+        <div class="st-ic"><span class="ph">${IC.note}</span>${s.cover ? `<img src="${esc(s.cover)}" onerror="this.remove()" loading="lazy">` : ''}</div>
+        <div class="tt"><b>${esc(s.title)}</b><small>${stationTag(s)}${esc(s.artist || '')}</small></div>
+        <button class="fav ${radioFav[s.url] ? 'on' : ''}" data-fav="${i}" aria-label="收藏">${radioFav[s.url] ? '★' : '☆'}</button>
+      </div>`).join('')}</div>`;
+  el.onclick = e => {
+    const f = e.target.closest('[data-fav]');
+    if (f) {
+      const s = R.list[+f.dataset.fav];
+      if (radioFav[s.url]) delete radioFav[s.url]; else radioFav[s.url] = s;
+      saveFav();
+      if (R.cat === 'fav' && !R.q) { R.list = Object.values(radioFav); }
+      return drawRadio();
+    }
+    const r = e.target.closest('.st-row');
+    if (r) playTracks(R.list, +r.dataset.i);
+  };
+  markRows();
+}
+function stationTag(s) {
+  if (s.lossless) return '<span class="tag hr">FLAC 无损</span>';
+  const c = [s.codec, s.bitrate ? s.bitrate + 'k' : ''].filter(Boolean).join(' ');
+  return c ? `<span class="tag lossy">${esc(c)}</span>` : '';
 }
 
 async function loadIA(reset) {
@@ -700,8 +881,8 @@ function trackList(el, tracks, showArtist) {
   el.innerHTML = `<div class="tracks">${tracks.map((t, i) => `
     <div class="tr" data-i="${i}" data-url="${esc(t.url)}">
       <span class="n">${t.no || i + 1}</span>
-      <span class="tt"><b>${esc(t.title)}</b><small>${qualityTag(t)}${showArtist ? esc(t.artist || '') : ''}<span class="st"></span></small></span>
-      <span class="d">${fmtTime(t.duration)}</span>
+      <span class="tt"><b>${esc(t.title)}</b><small>${t.live ? stationTag(t) : qualityTag(t)}${showArtist ? esc(t.artist || '') : ''}<span class="st"></span></small></span>
+      <span class="d">${t.live ? '直播' : fmtTime(t.duration)}</span>
     </div>`).join('')}</div>`;
   el.onclick = e => { const r = e.target.closest('.tr'); if (r) playTracks(tracks, +r.dataset.i); };
   markRows();
@@ -713,7 +894,7 @@ function qualityTag(t) {
 }
 function markRows() {
   const cur = P.queue[P.idx]?.url;
-  $$('.tr[data-url]').forEach(r => {
+  $$('.tr[data-url], .st-row[data-url]').forEach(r => {
     const u = r.dataset.url;
     r.classList.toggle('playing', u === cur);
     const st = $('.st', r);
@@ -855,6 +1036,7 @@ seek.oninput = () => {
   $('#npPos').textContent = fmtTime(seek.value / 1000 * (audio.duration || 0));
 };
 seek.onchange = () => {
+  if (P.queue[P.idx]?.live) { seeking = false; return; }
   if (audio.duration) audio.currentTime = seek.value / 1000 * audio.duration;
   seeking = false;
 };
@@ -869,7 +1051,11 @@ function onTrackChange(t, restoring) {
   $('#npBg').style.backgroundImage = t.cover ? `url("${t.cover.replace(/"/g, '%22')}")` : 'none';
   $('#npTitle').textContent = t.title || '';
   $('#npArtist').textContent = [t.artist, t.album].filter(Boolean).join(' — ');
-  $('#npQ').textContent = t.hires ? '24bit FLAC · 无损' : t.lossless ? 'FLAC · 无损' : (t.codec || 'MP3');
+  $('#npQ').textContent = t.live
+    ? ['电台直播', t.lossless ? 'FLAC 无损' : [t.codec, t.bitrate ? t.bitrate + 'k' : ''].filter(Boolean).join(' ')].filter(Boolean).join(' · ')
+    : t.hires ? '24bit FLAC · 无损' : t.lossless ? 'FLAC · 无损' : (t.codec || 'MP3');
+  $('#npSeek').disabled = !!t.live;
+  $('#np').classList.toggle('live', !!t.live);
   if (!restoring) setMediaSession(t);
   S.lyr.key = null;
   updateLyricsView();
@@ -888,6 +1074,13 @@ function updatePlayState() {
 
 function updateProgress() {
   if (P.curSrc === SILENCE) return;
+  if (P.queue[P.idx]?.live) {
+    $('#miniBar').style.width = '0';
+    $('#npPos').textContent = fmtTime(audio.currentTime);
+    $('#npDur').textContent = '● 直播';
+    seek.value = 1000; seek.style.setProperty('--p', '100%');
+    return;
+  }
   const d = audio.duration && isFinite(audio.duration) ? audio.duration : (P.queue[P.idx]?.duration || 0);
   const pos = audio.currentTime || 0;
   $('#miniBar').style.width = d ? (pos / d * 100) + '%' : '0';
@@ -917,6 +1110,7 @@ async function updateLyricsView(force) {
   if (!t || el.classList.contains('hidden') && !force) return;
   if (S.lyr.key === t.url) return;
   S.lyr = { key: t.url, lines: [], plain: '', cur: -1 };
+  if (t.live) { el.innerHTML = '<div class="none">电台直播没有歌词</div>'; return; }
   el.innerHTML = '<div class="none">正在找歌词…</div>';
   const r = await lrclib(t);
   if (S.lyr.key !== t.url) return;
