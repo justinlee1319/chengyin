@@ -3,7 +3,7 @@
  * 手机直接连 archive.org / Jamendo / LRCLIB（都支持跨域），不需要 PC。
  * 下载的歌存在 Cache Storage，离线可播；歌曲信息通过 Media Session 交给系统，CarPlay / 锁屏可以显示和控制。
  */
-const VERSION = '0.1.0';
+const VERSION = '0.2.0';
 const TRACK_CACHE = 'cy-tracks-v1';
 
 /* ---------------- 工具 ---------------- */
@@ -261,10 +261,33 @@ async function estimateStorage() {
   if (S.tab === 'settings' && !S.stack.length) render();
 }
 
-/* ---------------- 播放器 ---------------- */
-const audio = new Audio();
-audio.preload = 'auto';
-const P = { queue: [], idx: -1, repeat: 'off', next: null, curSrc: '', unlocked: false, resumeAt: 0 };
+/* ---------------- 诊断日志（锁屏切歌之类只能在真机上查的问题靠它） ---------------- */
+const LOG = load('cy.log', []);
+let logTimer;
+function log(msg) {
+  const d = new Date();
+  const ts = `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ` +
+    `${d.toTimeString().slice(0, 8)}.${String(d.getMilliseconds()).padStart(3, '0')}`;
+  LOG.push(`${ts} [${document.hidden ? '锁屏/后台' : '前台'}] ${msg}`);
+  if (LOG.length > 300) LOG.splice(0, LOG.length - 300);
+  clearTimeout(logTimer);
+  logTimer = setTimeout(() => save('cy.log', LOG), 300);
+}
+document.addEventListener('visibilitychange', () => log('页面' + (document.hidden ? '进入后台' : '回到前台')));
+window.addEventListener('pageshow', () => log('pageshow'));
+window.addEventListener('pagehide', () => { log('pagehide'); save('cy.log', LOG); });
+
+/* ---------------- 播放器 ----------------
+ * 两个 <audio> 轮流用：当前这首在播时，另一个已经把下一首加载好；
+ * 播完那一刻只需要同步调用一次 play()，不用在后台换地址、读缓存（锁屏时 iOS 很可能不给执行这些）。
+ * 锁屏时还会在这首快结束前就启动下一首，让音频不中断，避免 iOS 趁空档把 App 挂起。 */
+const A = [new Audio(), new Audio()];
+A.forEach(el => { el.preload = 'auto'; el.setAttribute('playsinline', ''); });
+let cur = 0;
+let audio = A[0]; // 当前正在用的那个
+const P = { queue: [], idx: -1, repeat: 'off', ready: null, srcs: ['', ''], unlocked: false, resumeAt: 0, switching: false };
+Object.defineProperty(P, 'curSrc', { get: () => P.srcs[cur] });
+const other = () => A[1 - cur];
 
 function makeSilence() {
   // 0.05 秒静音 WAV：第一次点击时先"解锁"播放器，之后异步取到的歌才能正常开播（iOS 限制）
@@ -287,11 +310,11 @@ async function srcFor(t) {
   return t.url;
 }
 
-function setSrc(src) {
-  const old = P.curSrc;
-  P.curSrc = src;
-  audio.src = src;
-  if (old && old.startsWith('blob:') && old !== src && old !== SILENCE && (!P.next || P.next.src !== old)) URL.revokeObjectURL(old);
+function setElSrc(k, src) {
+  const old = P.srcs[k];
+  P.srcs[k] = src;
+  A[k].src = src;
+  if (old && old.startsWith('blob:') && old !== SILENCE && old !== src && P.srcs[1 - k] !== old) URL.revokeObjectURL(old);
 }
 
 function nextIndex(auto) {
@@ -301,76 +324,121 @@ function nextIndex(auto) {
   return null;
 }
 
+// iOS 规定每个 <audio> 第一次播放都要由用户点击触发：第一次点击时把两个都"解锁"
 function unlock() {
   if (P.unlocked) return;
   P.unlocked = true;
-  P.curSrc = SILENCE;
-  audio.src = SILENCE;
-  audio.play().catch(() => {});
+  A.forEach((el, k) => {
+    P.srcs[k] = SILENCE;
+    el.src = SILENCE;
+    el.play().then(() => { if (P.srcs[k] === SILENCE) el.pause(); }).catch(e => log(`解锁播放器${k} 失败：${e.name}`));
+  });
+  log('两个播放器已解锁');
 }
 
 async function playTracks(tracks, i = 0) {
   unlock();
   P.queue = tracks.map(t => ({ ...t }));
-  P.next = null;
+  P.ready = null;
   await playAt(i);
 }
 
 async function playAt(i, startAt = 0) {
   unlock();
   if (i < 0 || i >= P.queue.length) return;
+  // 要播的正好是已经在另一个播放器里准备好的下一首：直接切过去
+  if (P.ready && P.ready.i === i && startAt <= 1) return switchToReady('手动');
   P.idx = i;
   const t = P.queue[i];
   onTrackChange(t);
   let src;
-  if (P.next && P.next.i === i) { src = P.next.src; P.next = null; }
-  else {
-    try { src = await srcFor(t); } catch (e) { toast(e.message, true); return; }
-  }
+  try { src = await srcFor(t); } catch (e) { toast(e.message, true); return; }
   if (P.idx !== i) return; // 取文件期间用户又点了别的
-  setSrc(src);
+  other().pause();
+  setElSrc(cur, src);
   P.resumeAt = 0;
   if (startAt > 1) audio.addEventListener('loadedmetadata', () => { audio.currentTime = startAt; }, { once: true });
-  try { await audio.play(); } catch (e) { if (e.name !== 'AbortError') toast('播放失败：' + e.message, true); }
+  log(`播放 #${i}《${t.title}》${src.startsWith('blob:') ? '（离线）' : '（在线）'}`);
+  try { await audio.play(); } catch (e) {
+    log(`play() 被拒绝：${e.name} ${e.message}`);
+    if (e.name !== 'AbortError') toast('播放失败：' + e.message, true);
+  }
   prepareNext();
   saveState();
 }
 
-// 提前把下一首准备好：锁屏/CarPlay 时，这首一结束就能同步切过去（后台里再异步取文件容易被 iOS 卡住）
+// 把下一首提前装进另一个播放器并开始缓冲
 async function prepareNext() {
   const n = nextIndex(true);
-  const old = P.next;
-  P.next = null;
-  if (old && old.src.startsWith('blob:') && old.src !== P.curSrc) URL.revokeObjectURL(old.src);
+  P.ready = null;
   if (n === null || n === P.idx) return;
   const t = P.queue[n];
-  try {
-    const src = await srcFor(t);
-    if (nextIndex(true) === n && !P.next) P.next = { i: n, src };
-    else if (src.startsWith('blob:')) URL.revokeObjectURL(src);
-  } catch { /* 下一首没下载且开了只播已下载，到时候再提示 */ }
+  let src;
+  try { src = await srcFor(t); } catch { return; } // 没下载且开了只播已下载：到时候再提示
+  if (nextIndex(true) !== n || P.ready) { if (src.startsWith('blob:')) URL.revokeObjectURL(src); return; }
+  const k = 1 - cur;
+  setElSrc(k, src);
+  A[k].load();
+  P.ready = { i: n, k };
+  log(`已预备下一首 #${n}《${t.title}》`);
 }
 
-audio.addEventListener('ended', () => {
-  if (P.curSrc === SILENCE) return;
+// 切到另一个播放器里准备好的那首：这里全是同步操作，锁屏时也能执行
+function switchToReady(reason) {
+  const r = P.ready;
+  if (!r || r.k !== 1 - cur || P.switching) return false;
+  P.switching = true;
+  const prevEl = audio;
+  cur = r.k;
+  audio = A[cur];
+  P.ready = null;
+  P.idx = r.i;
+  audio.currentTime = 0;
+  const pr = audio.play();
+  prevEl.pause();
+  log(`切到下一首 #${r.i}（${reason}）`);
+  pr.then(() => log('下一首开始播放 ✓'))
+    .catch(e => { log(`下一首 play() 被拒绝：${e.name} ${e.message}`); toast('自动切歌被系统拦截了：' + e.name, true); });
+  onTrackChange(P.queue[r.i]);
+  P.switching = false;
+  prepareNext();
+  saveState();
+  return true;
+}
+
+function advance(reason) {
   const n = nextIndex(true);
-  if (n === null) { saveState(); return updatePlayState(); }
-  if (n === P.idx) { audio.currentTime = 0; audio.play(); return; }
-  if (P.next && P.next.i === n) {
-    P.idx = n;
-    const src = P.next.src;
-    P.next = null;
-    setSrc(src);
-    audio.play().catch(() => {});
-    onTrackChange(P.queue[n]);
-    prepareNext();
-    saveState();
-  } else playAt(n);
-});
-audio.addEventListener('error', () => {
-  if (!P.curSrc || P.curSrc === SILENCE) return;
-  const t = P.queue[P.idx];
-  toast(`《${t ? t.title : ''}》播放出错，可能是网络问题`, true);
+  if (n === null) { log('队列播完了'); saveState(); return updatePlayState(); }
+  if (n === P.idx) { audio.currentTime = 0; audio.play().catch(() => {}); return; }
+  if (!switchToReady(reason)) { log(`下一首还没准备好，现取（${reason}）`); playAt(n); }
+}
+
+// 锁屏时：这首快结束了就提前启动下一首（按实际 timeupdate 间隔留余量）
+let lastTU = 0, tuGap = 0.25;
+function maybeEarlySwitch() {
+  const now = performance.now() / 1000;
+  if (lastTU) tuGap = Math.min(1.5, Math.max(0.15, 0.7 * tuGap + 0.3 * (now - lastTU)));
+  lastTU = now;
+  if (!document.hidden || !P.ready || audio.paused) return;
+  const d = audio.duration;
+  if (!d || !isFinite(d)) return;
+  if (d - audio.currentTime < Math.max(0.3, tuGap * 1.3)) advance('锁屏提前切');
+}
+
+A.forEach(el => {
+  el.addEventListener('ended', () => {
+    if (el !== audio || P.curSrc === SILENCE) return;
+    log('这首播完了（ended）');
+    advance('播完');
+  });
+  el.addEventListener('error', () => {
+    if (el !== audio || !P.curSrc || P.curSrc === SILENCE) return;
+    const t = P.queue[P.idx];
+    log(`播放出错 code=${el.error && el.error.code}`);
+    toast(`《${t ? t.title : ''}》播放出错，可能是网络问题`, true);
+  });
+  el.addEventListener('pause', () => { if (el === audio && document.hidden && !el.ended) log('被暂停（后台）'); });
+  el.addEventListener('stalled', () => { if (el === audio) log('网络卡住（stalled）'); });
 });
 
 function toggle() {
@@ -403,7 +471,9 @@ if ('mediaSession' in navigator) {
   // 故意不设 seekforward/seekbackward：设了的话车机上会显示"快进 10 秒"而不是"下一首"
 }
 let lastPos = 0;
-audio.addEventListener('timeupdate', () => {
+A.forEach(el => el.addEventListener('timeupdate', () => {
+  if (el !== audio) return;
+  maybeEarlySwitch();
   updateProgress();
   const now = Date.now();
   if (now - lastPos > 5000) {
@@ -414,8 +484,8 @@ audio.addEventListener('timeupdate', () => {
         navigator.mediaSession?.setPositionState?.({ duration: audio.duration, position: Math.min(audio.currentTime, audio.duration), playbackRate: 1 });
     } catch { /* 忽略 */ }
   }
-});
-['play', 'pause', 'playing', 'waiting'].forEach(ev => audio.addEventListener(ev, updatePlayState));
+}));
+A.forEach(el => ['play', 'pause', 'playing', 'waiting'].forEach(ev => el.addEventListener(ev, () => { if (el === audio) updatePlayState(); })));
 
 function saveState() {
   save('cy.state', { queue: P.queue, idx: P.idx, pos: audio.currentTime || P.resumeAt || 0, repeat: P.repeat });
@@ -709,6 +779,15 @@ function renderSettings(v) {
         <div class="meter"><i style="width:${pct.toFixed(1)}%"></i></div></div></div>
       <div class="item"><div class="l">删除全部下载</div><button class="btn danger" id="clr">删除</button></div>
     </div>
+    <h3 class="hint" style="margin:6px 4px 8px">诊断</h3>
+    <div class="group">
+      <div class="item"><div class="l">诊断日志<small>锁屏切歌等问题的记录（${LOG.length} 条）。有问题时点「复制」发给开发者</small></div>
+        <button class="btn" id="logShow">查看</button></div>
+      <div id="logBox" style="display:none">
+        <pre class="log" id="logPre"></pre>
+        <div class="item"><button class="btn" id="logCopy">复制</button><button class="btn danger" id="logClr">清空</button></div>
+      </div>
+    </div>
     <h3 class="hint" style="margin:6px 4px 8px">Jamendo</h3>
     <div class="group">
       <div class="item"><input class="field" id="jam" placeholder="粘贴 Client ID（可不填）" value="${esc(settings.jamendo)}" autocomplete="off" autocapitalize="off"></div>
@@ -717,6 +796,17 @@ function renderSettings(v) {
       曲库只收录授权明确的免费音乐：archive.org 的 Live Music Archive（乐队允许非商业交换的现场录音）、Netlabels 与古典音乐（Creative Commons / 公有领域），以及 Jamendo（Creative Commons）。歌词来自 LRCLIB。<br>
       在车上：用 CarPlay 的「正在播放」和方向盘按键控制。上车前在家用 Wi-Fi 下载好。<br>
       版本 ${VERSION}</p>`;
+  $('#logShow').onclick = () => {
+    const box = $('#logBox'), open = box.style.display === 'none';
+    box.style.display = open ? '' : 'none';
+    $('#logPre').textContent = LOG.slice(-120).reverse().join('\n') || '（还没有记录）';
+  };
+  $('#logCopy').onclick = async () => {
+    const txt = `澄音 ${VERSION} · ${navigator.userAgent}\n` + LOG.slice(-150).join('\n');
+    try { await navigator.clipboard.writeText(txt); toast('已复制，可以粘贴发送了'); }
+    catch { toast('复制失败，请截图', true); }
+  };
+  $('#logClr').onclick = () => { LOG.length = 0; save('cy.log', LOG); $('#logPre').textContent = '（已清空）'; };
   $('#off').onchange = e => { settings.offlineOnly = e.target.checked; saveSettings(); prepareNext(); };
   $('#jam').onchange = e => { settings.jamendo = e.target.value.trim(); saveSettings(); S.jam = { ...S.jam, tracks: [], err: null }; toast('已保存'); };
   $('#clr').onclick = async () => {
