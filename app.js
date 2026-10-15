@@ -3,7 +3,7 @@
  * 手机直接连 archive.org / Jamendo / LRCLIB（都支持跨域），不需要 PC。
  * 下载的歌存在 Cache Storage，离线可播；歌曲信息通过 Media Session 交给系统，CarPlay / 锁屏可以显示和控制。
  */
-const VERSION = '0.3.0';
+const VERSION = '0.4.0';
 const TRACK_CACHE = 'cy-tracks-v1';
 
 /* ---------------- 工具 ---------------- */
@@ -165,12 +165,30 @@ const LOSSLESS_RADIO = [
   { name: 'Rondo Classic · Klasu', desc: '古典（芬兰）', flac: 'https://iradio.fi/klasu.flac', alt: 'https://iradio.fi/klasu-hi.mp3', raw: true },
   { name: 'Rondo Classic · Klasu Pro', desc: '古典，无主持人', flac: 'https://iradio.fi/klasupro.flac', raw: true },
 ];
+// 基督敬拜：最受欢迎的流行风格当代基督教音乐（CCM）电台排最前，后面接目录里的同类电台
+const EMF = 'https://maestro.emfcdn.com/stream_for/';
+const WORSHIP_RADIO = [
+  ['K-LOVE', '美国最受欢迎的当代基督教流行音乐台', EMF + 'k-love/airable/aac'],
+  ['Air1', '敬拜歌曲为主（Hillsong、Elevation 风格）', EMF + 'air1/airable/aac'],
+  ['K-LOVE 2010s', '2010 年代的基督教流行金曲', EMF + 'k-love-2010s/airable/aac'],
+  ['K-LOVE 80s', '经典老歌', EMF + 'k-love-80s/airable/aac'],
+  ['The JOY FM', '流行 / 敬拜', 'https://rtn.cdnstream1.com/2576_96.aac'],
+  ['WayFM', '年轻、偏流行', 'https://ais-sa8.cdnstream1.com/3147_64.aac'],
+  ['HIS Radio Praise', '赞美敬拜', 'https://rtn.cdnstream1.com/2568_96.aac'],
+  ['Spirit FM', '当代基督教音乐', 'https://positivealtradio.streamguys1.com/wrxtmp3'],
+  ['The Mix · Positive Hits', '正能量流行', 'https://themix2.logonix.net:8443/high'],
+  ['良友电台 · 友音乐', '中文诗歌 / 福音音乐（香港）', 'https://c25.radioboss.fm:8334/stream'],
+  ['美蹤廣播電台', '中文福音广播', 'https://cast6.my-control-panel.com/proxy/footprint/stream'],
+].map(([title, artist, url]) => ({ title, artist, album: '电台', cover: '', url, live: true, radio: true,
+  codec: url.includes('radioboss') || url.includes('footprint') ? 'MP3' : 'AAC', bitrate: 0, lossless: false }));
 const RADIO_CATS = [
   { id: 'lossless', name: '无损精选' },
   { id: 'cn', name: '华语音乐', music: true, queries: [{ countrycode: 'CN' }, { countrycode: 'TW' }, { countrycode: 'HK' },
     { tag: 'cpop' }, { tag: 'mandopop' }, { tag: 'cantopop' }] },
   { id: 'west', name: '欧美流行', countries: ['US', 'GB', 'CA', 'AU', 'IE', 'NZ'],
     queries: [{ tag: 'top 40' }, { tag: 'pop', countrycode: 'US' }, { tag: 'pop', countrycode: 'GB' }, { tag: 'hits', countrycode: 'US' }] },
+  { id: 'worship', name: '基督敬拜', curated: WORSHIP_RADIO,
+    queries: [{ tag: 'christian contemporary' }, { tag: 'contemporary christian' }, { tag: 'ccm' }, { tag: 'christian pop' }, { tag: 'worship' }] },
   { id: 'jazz', name: '爵士', queries: [{ tag: 'jazz' }] },
   { id: 'classical', name: '古典', queries: [{ tag: 'classical' }] },
   { id: 'chill', name: '轻音乐', queries: [{ tag: 'chillout' }, { tag: 'lounge' }, { tag: 'relax' }] },
@@ -223,6 +241,10 @@ async function radioList(catId) {
   if (catId === 'lossless') return curatedStations();
   if (catId === 'fav') return Object.values(radioFav);
   const rows = (await Promise.all(cat.queries.map(q => rbSearch(q).catch(() => [])))).flat();
+  if (cat.curated) { // 精选在前，目录里重复的去掉
+    const have = new Set(cat.curated.map(c => c.url));
+    return [...cat.curated, ...dedupeStations(rows.filter(s => playableOnPhone(s) && !have.has(s.url_resolved)))].slice(0, 80);
+  }
   return dedupeStations(rows.filter(s => playableOnPhone(s) && (!cat.countries || cat.countries.includes(s.countrycode)) && (!cat.music ||
     (MUSIC_RE.test(s.tags + ' ' + s.name) && !NOT_MUSIC_RE.test(s.tags + ' ' + s.name))))).slice(0, 80);
 }
@@ -576,7 +598,7 @@ function setMediaSession(t) {
   if (!('mediaSession' in navigator)) return;
   navigator.mediaSession.metadata = new MediaMetadata({
     title: t.title || '', artist: t.artist || '', album: t.album || '',
-    artwork: t.cover ? [{ src: t.cover, sizes: '512x512' }] : [],
+    artwork: [{ src: new URL(t.cover || 'icons/icon-512.png', location.href).href, sizes: '512x512' }],
   });
 }
 if ('mediaSession' in navigator) {
@@ -1044,11 +1066,12 @@ seek.onchange = () => {
 function onTrackChange(t, restoring) {
   if (!t) return;
   $('#mini').classList.remove('hidden');
-  $('#miniCover').src = t.cover || '';
+  const cover = t.cover || 'icons/icon-512.png'; // 没封面（比如电台）就用 App 图标，别显示破图
+  $('#miniCover').src = cover;
   $('#miniTitle').textContent = t.title || '';
   $('#miniArtist').textContent = t.artist || '';
-  $('#npCover').src = t.cover || '';
-  $('#npBg').style.backgroundImage = t.cover ? `url("${t.cover.replace(/"/g, '%22')}")` : 'none';
+  $('#npCover').src = cover;
+  $('#npBg').style.backgroundImage = `url("${cover.replace(/"/g, '%22')}")`;
   $('#npTitle').textContent = t.title || '';
   $('#npArtist').textContent = [t.artist, t.album].filter(Boolean).join(' — ');
   $('#npQ').textContent = t.live
