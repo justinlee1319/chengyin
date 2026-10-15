@@ -36,7 +36,7 @@ i[data-ic] { display: inline-flex; font-style: normal; }
 main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4px 18px calc(var(--tabs-h) + var(--sb) + var(--mini-h) + 24px); }
 
 /* 标签栏 */
-.tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: grid; grid-template-columns: repeat(4, 1fr);
+.tabs { position: fixed; left: 0; right: 0; bottom: 0; z-index: 10; display: grid; grid-template-columns: repeat(5, 1fr);
   height: calc(var(--tabs-h) + var(--sb)); padding-bottom: var(--sb); background: rgba(16, 18, 24, .92);
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px); border-top: 1px solid var(--line); }
 .tabs button { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; color: var(--dim); font-size: 10.5px; }
@@ -196,3 +196,15 @@ main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 4p
   .grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
   main, .top { max-width: 900px; margin: 0 auto; width: 100%; }
 }
+
+/* 我的曲库 */
+.pc-status { font-size: 13px; line-height: 1.6; color: var(--muted); margin: 0 2px 12px; }
+.pc-status:empty { display: none; }
+.pc-status.off { background: rgba(255,120,100,.08); border: 1px solid rgba(255,120,100,.25); color: #f1b3a8; border-radius: 12px; padding: 10px 12px; }
+.pc-status .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; background: var(--dim); }
+.pc-status .dot.ok { background: #5cc98a; }
+.pc-status .dot.wait { background: var(--gold); animation: blink 1s infinite alternate; }
+.pc-status .dot.off { background: #ff7a66; }
+@keyframes blink { to { opacity: .3; } }
+.cover .badge-ok { position: absolute; z-index: 2; right: 6px; bottom: 6px; width: 24px; height: 24px; border-radius: 50%; background: rgba(0,0,0,.6); color: #5cc98a; display: flex; align-items: center; justify-content: center; font-size: 16px; }
+.steps .item { padding: 11px 16px; font-size: 14px; }

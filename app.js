@@ -3,7 +3,7 @@
  * 手机直接连 archive.org / Jamendo / LRCLIB（都支持跨域），不需要 PC。
  * 下载的歌存在 Cache Storage，离线可播；歌曲信息通过 Media Session 交给系统，CarPlay / 锁屏可以显示和控制。
  */
-const VERSION = '0.4.0';
+const VERSION = '0.5.0';
 const TRACK_CACHE = 'cy-tracks-v1';
 
 /* ---------------- 工具 ---------------- */
@@ -50,6 +50,7 @@ const IC = {
   gear: P_('M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2.03-1.58a.5.5 0 0 0 .12-.64l-1.92-3.32a.5.5 0 0 0-.61-.22l-2.39.96a7.03 7.03 0 0 0-1.62-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.84a.5.5 0 0 0-.49.42l-.36 2.54c-.59.24-1.13.56-1.62.94l-2.39-.96a.5.5 0 0 0-.61.22L2.67 8.48a.5.5 0 0 0 .12.64l2.03 1.58a7.07 7.07 0 0 0 0 1.88l-2.03 1.58a.5.5 0 0 0-.12.64l1.92 3.32c.13.22.39.3.61.22l2.39-.96c.49.38 1.03.7 1.62.94l.36 2.54c.05.24.25.42.49.42h3.84c.24 0 .45-.18.49-.42l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.48 0 .61-.22l1.92-3.32a.5.5 0 0 0-.12-.64l-2.03-1.58zM12 15.5A3.5 3.5 0 1 1 12 8.5a3.5 3.5 0 0 1 0 7z'),
   note: P_('M12 3v10.55A4 4 0 1 0 14 17V7h4V3h-6z'),
   close: P_('M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z'),
+  computer: P_('M20 18a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2H0v2h24v-2h-4zM4 6h16v10H4V6z'),
   trash: P_('M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z'),
 };
 function paintIcons(root = document) { $$('i[data-ic]', root).forEach(i => (i.innerHTML = IC[i.dataset.ic] || '')); }
@@ -267,6 +268,7 @@ const lyrCache = {};
 async function lrclib(t) {
   const key = t.title + '|' + t.artist;
   if (key in lyrCache) return lyrCache[key];
+  if (t.pc) { const j = await pcLyrics(t); if (j) return (lyrCache[key] = j); }
   let res = null;
   try {
     const p = new URLSearchParams({ track_name: t.title, artist_name: t.artist || '' });
@@ -284,7 +286,7 @@ async function lrclib(t) {
 }
 
 /* ---------------- 离线下载 ---------------- */
-const mimeOf = url => /\.mp3($|\?)/i.test(url) ? 'audio/mpeg' : /\.ogg($|\?)/i.test(url) ? 'audio/ogg' : 'audio/flac';
+const mimeOf = url => /\.mp3($|\?)/i.test(url) ? 'audio/mpeg' : /\.ogg($|\?)/i.test(url) ? 'audio/ogg' : /\.m4a($|\?)/i.test(url) ? 'audio/mp4' : 'audio/flac';
 const DL = { queue: [], running: false, prog: {} }; // prog[url] = 0~1
 
 function rememberAlbum(album) {
@@ -294,13 +296,14 @@ function rememberAlbum(album) {
   saveLib();
 }
 
-function queueDownload(album, tracks) {
+function queueDownload(album, tracks, quiet) {
   rememberAlbum(album);
   const todo = tracks.filter(t => !lib.saved[t.url] && !DL.queue.includes(t) && !(t.url in DL.prog));
-  if (!todo.length) return toast('都已经下载好了');
+  if (!todo.length) return quiet || toast('都已经下载好了');
   todo.forEach(t => (DL.prog[t.url] = 0));
   DL.queue.push(...todo);
-  toast(`开始下载 ${todo.length} 首（建议连 Wi-Fi）`);
+  if (album.pc && album.cover) fetch(album.cover).catch(() => {}); // 封面先存下来，离线时锁屏 / CarPlay 也有
+  if (!quiet) toast(`开始下载 ${todo.length} 首${album.pc ? '' : '（建议连 Wi-Fi）'}`);
   navigator.storage?.persist?.();
   runDownloads();
   refreshDownloadUI();
@@ -324,8 +327,13 @@ async function runDownloads() {
 }
 
 async function downloadOne(t) {
-  const res = await fetch(t.url);
-  if (!res.ok) throw new Error('HTTP ' + res.status);
+  let res;
+  try {
+    res = t.pc ? await pcFetch(`/api/file/${t.pcId}?fmt=${t.fmt}`, {}, 120000) : await fetch(t.url);
+  } catch (e) {
+    throw new Error(t.pc ? '连不上电脑（要在家里的 Wi-Fi 下）' : e.message);
+  }
+  if (!res.ok) throw new Error(t.pc ? ((await res.json().catch(() => ({}))).error || 'HTTP ' + res.status) : 'HTTP ' + res.status);
   const total = +res.headers.get('Content-Length') || t.size || 0;
   let got = 0, last = 0;
   const count = n => {
@@ -333,7 +341,7 @@ async function downloadOne(t) {
     if (total) DL.prog[t.url] = got / total;
     if (Date.now() - last > 400) { last = Date.now(); refreshDownloadUI(); }
   };
-  const headers = { 'Content-Type': mimeOf(t.url) };
+  const headers = { 'Content-Type': t.pc ? (res.headers.get('Content-Type') || mimeOf(t.url)) : mimeOf(t.url) };
   const cache = await caches.open(TRACK_CACHE);
   if (res.body && typeof TransformStream !== 'undefined') {
     // 边下边写进缓存，不把整首歌攒在内存里
@@ -346,13 +354,14 @@ async function downloadOne(t) {
   }
   lib.saved[t.url] = got;
   saveLib();
+  if (t.pc) pcSaveLyrics(t);
 }
 
 async function deleteAlbum(key) {
   const a = lib.albums[key];
   if (!a) return;
   const cache = await caches.open(TRACK_CACHE);
-  for (const t of a.tracks) { await cache.delete(t.url); delete lib.saved[t.url]; }
+  for (const t of a.tracks) { await cache.delete(t.url); delete lib.saved[t.url]; if (t.pc) await cache.delete(pcLyrKey(t.pcId)); }
   delete lib.albums[key];
   saveLib();
   estimateStorage();
@@ -424,10 +433,14 @@ async function srcFor(t) {
   }
   if (lib.saved[t.url]) {
     const r = await (await caches.open(TRACK_CACHE)).match(t.url);
-    if (r) return URL.createObjectURL(new Blob([await r.blob()], { type: mimeOf(t.url) }));
+    if (r) return URL.createObjectURL(new Blob([await r.blob()], { type: r.headers.get('Content-Type') || mimeOf(t.url) }));
     delete lib.saved[t.url]; saveLib();
   }
   if (settings.offlineOnly) throw new Error('这首还没下载（设置里开了"只播已下载"）');
+  if (t.pc) {
+    if (!pc.token) throw new Error('这首还没下载，而且手机还没和电脑配对');
+    return pcFileURL(t); // 在家里 Wi-Fi 下直接从电脑播
+  }
   return t.url;
 }
 
@@ -638,10 +651,224 @@ function restoreState() {
   onTrackChange(P.queue[P.idx], true);
 }
 
+/* ---------------- 我的曲库（家里电脑上的澄音 PC 版） ----------------
+ * 只在家里 Wi-Fi 下连：PC 版「手机同步」开着时，从电脑下载歌存到手机，出门离线听。
+ * 下载的歌用固定的本站地址当缓存的 key（pc/track/格式/id），电脑换了 IP 也不影响已下载的歌。 */
+const pc = Object.assign({ host: '', token: '', server: '', albums: [], fmt: 'flac', at: 0 }, load('cy.pc', {}));
+const savePc = () => save('cy.pc', pc);
+const PCS = { conn: 'idle', err: '', q: '', busy: false, tried: 0 }; // conn: idle / loading / ok / off
+const PC_LOSSY = ['MP3', 'OGG', 'OPUS'];
+
+function pcBase() {
+  const h = (pc.host || '').trim().replace(/\/+$/, '');
+  if (/^https?:\/\//i.test(h)) return h;
+  return `https://${h}${/:\d+$/.test(h) ? '' : ':17390'}`;
+}
+async function pcFetch(path, opt = {}, ms = 8000) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), ms);
+  try {
+    const headers = { ...(opt.headers || {}) };
+    if (pc.token) headers.Authorization = 'Bearer ' + pc.token;
+    return await fetch(pcBase() + path, { ...opt, headers, signal: ctl.signal });
+  } finally { clearTimeout(timer); }
+}
+const pcKey = (fmt, id) => new URL(`pc/track/${fmt}/${id}`, location.href).href;
+const pcLyrKey = id => new URL(`pc/lyrics/${id}`, location.href).href;
+const pcFileURL = t => `${pcBase()}/api/file/${t.pcId}?fmt=${t.fmt}&t=${enc(pc.token)}`;
+const pcCoverURL = id => new URL(`pc/cover/${id}`, location.href).href + `?src=${enc(`${pcBase()}/api/cover/${id}?t=${enc(pc.token)}`)}`;
+
+function pcAlbum(a, fmt) {
+  const cover = pcCoverURL(a.cover);
+  return {
+    key: 'pc:' + a.id, pc: true, title: a.title, artist: a.artist, cover, mtime: a.mtime,
+    srcQ: srcQuality(a.tracks),
+    tracks: a.tracks.map((t, i) => {
+      const lossy = PC_LOSSY.includes(t.codec) || (t.codec === 'M4A' && !t.bits);
+      return {
+        url: pcKey(fmt, t.id), pc: true, pcId: t.id, fmt, title: t.title, artist: t.artist || a.artist,
+        album: a.title, cover, no: t.track || i + 1, duration: t.duration, size: t.size,
+        lossless: fmt === 'flac' && !lossy, hires: false,
+        codec: lossy ? (t.codec === 'M4A' ? 'AAC' : t.codec) : fmt === 'aac' ? 'AAC 256' : 'FLAC',
+      };
+    }),
+  };
+}
+function srcQuality(tracks) {
+  const t = tracks.reduce((m, x) => (x.bits * 1e6 + x.sr > m.bits * 1e6 + m.sr ? x : m), tracks[0]);
+  if (!t) return '';
+  if (PC_LOSSY.includes(t.codec) || (t.codec === 'M4A' && !t.bits)) return t.codec;
+  return `${t.codec} ${t.bits || 16}bit / ${+(t.sr / 1000).toFixed(1)}kHz`;
+}
+
+async function pcPair(host, code) {
+  pc.host = host.trim(); pc.token = '';
+  let r;
+  try {
+    r = await pcFetch('/api/pair', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: code.trim(), name: /iPad/.test(navigator.userAgent) ? 'iPad' : 'iPhone' }) });
+  } catch (e) {
+    log('配对连不上：' + e.message);
+    throw new Error(pcUnreachable());
+  }
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || '配对失败 ' + r.status);
+  pc.token = j.token; pc.server = j.server || ''; pc.albums = []; pc.at = 0;
+  savePc();
+  log('已配对电脑 ' + pc.server);
+}
+function pcUnreachable() {
+  return '连不上电脑。请确认：① 手机连的是家里的 Wi-Fi；② 电脑上澄音的「手机同步」开着；③ 证书已经安装，并在「证书信任设置」里打开了；④ 地址没输错。';
+}
+async function pcRefresh(force) {
+  if (!pc.token || PCS.busy) return;
+  if (!force && PCS.conn === 'ok' && Date.now() - pc.at < 60000) return;
+  if (!force && PCS.conn === 'off' && Date.now() - PCS.tried < 30000) return; // 连不上时别每次刷新界面都重试
+  PCS.busy = true; PCS.conn = 'loading'; PCS.err = ''; PCS.tried = Date.now();
+  drawPcStatus();
+  try {
+    const r = await pcFetch('/api/albums', {}, 10000);
+    if (r.status === 401) {
+      pc.token = ''; savePc();
+      PCS.conn = 'idle'; PCS.err = '电脑上已经移除了这台手机，请重新配对';
+    } else {
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || 'HTTP ' + r.status);
+      pc.fmt = j.format; pc.albums = j.albums; pc.at = Date.now();
+      savePc();
+      PCS.conn = 'ok';
+    }
+  } catch (e) {
+    PCS.conn = 'off';
+    PCS.err = e.name === 'AbortError' ? '电脑没有响应' : '';
+  }
+  PCS.busy = false;
+  if (S.tab === 'pc' && !S.stack.length) render();
+}
+
+function pcAlbums() { return pc.albums.map(a => pcAlbum(a, pc.fmt)); }
+function albumState(a) {
+  const saved = a.tracks.filter(t => lib.saved[t.url]).length;
+  const busy = a.tracks.some(t => t.url in DL.prog);
+  return { saved, busy, all: saved === a.tracks.length };
+}
+
+function renderPc(v) {
+  header('我的曲库');
+  if (!pc.token) return renderPcPair(v);
+  const albums = pcAlbums();
+  const q = PCS.q.toLowerCase();
+  const shown = q ? albums.filter(a => (a.title + ' ' + a.artist).toLowerCase().includes(q)) : albums;
+  const todo = albums.filter(a => !albumState(a).all);
+  const todoSize = todo.reduce((s, a) => s + a.tracks.filter(t => !lib.saved[t.url]).reduce((x, t) => x + (t.size || 0), 0), 0);
+  const free = storage.quota ? storage.quota - storage.usage : 0;
+  v.innerHTML = `
+    <div class="pc-status" id="pcStatus"></div>
+    ${albums.length ? `<div class="search">${IC.search}<input id="pq" type="search" placeholder="搜索专辑 / 艺人" value="${esc(PCS.q)}"></div>
+    <div class="actions" style="margin-top:0">
+      <button class="btn primary" id="pAll" ${todo.length && PCS.conn === 'ok' ? '' : 'disabled'}>${IC.download}${todo.length ? `全部下载 ${fmtMB(todoSize)}` : '已全部下载'}</button>
+      <button class="btn" id="pRef">刷新</button></div>
+    ${free ? `<p class="sub" style="margin:-4px 2px 12px">手机上澄音还能用 ${fmtMB(free)} · 格式：${pc.fmt === 'aac' ? 'AAC 256' : '16/44.1 FLAC'}（在电脑上改）</p>` : ''}
+    <div class="grid" id="pg">${shown.map((a, i) => {
+      const st = albumState(a);
+      return `<div class="card" data-i="${albums.indexOf(a)}"><div class="cover"><div class="ph">${IC.note}</div><img loading="lazy" src="${esc(a.cover)}" onerror="this.remove()">
+        ${st.all ? `<span class="badge-ok">${IC.check}</span>` : ''}</div>
+        <div class="ct">${esc(a.title)}</div><div class="cs">${esc(a.artist)} · ${st.all ? '已下载' : st.busy ? '下载中…' : st.saved ? `${st.saved}/${a.tracks.length} 首` : `${a.tracks.length} 首 · ${fmtMB(a.tracks.reduce((s, t) => s + (t.size || 0), 0))}`}</div></div>`;
+    }).join('')}</div>`
+    : PCS.conn === 'ok' ? `<div class="empty"><b>电脑上的曲库是空的</b>先在电脑上的澄音里用「导入」加点歌</div>` : ''}
+    <div class="group" style="margin-top:22px"><div class="item"><div class="l">已配对：${esc(pc.server || '电脑')}<small>地址 ${esc(pc.host)}</small></div>
+      <button class="btn danger" id="pUnpair">解除配对</button></div></div>`;
+  drawPcStatus();
+  const qi = $('#pq', v);
+  if (qi) qi.onkeydown = e => { if (e.key === 'Enter') { qi.blur(); PCS.q = qi.value.trim(); render(); } };
+  if (qi) qi.onsearch = () => { PCS.q = qi.value.trim(); render(); };
+  const g = $('#pg', v);
+  if (g) g.onclick = e => { const c = e.target.closest('.card'); if (c) push({ ...albums[+c.dataset.i] }); };
+  const all = $('#pAll', v);
+  if (all) all.onclick = () => {
+    if (free && todoSize > free * 0.9) return toast(`空间不够：需要 ${fmtMB(todoSize)}，手机上还能用 ${fmtMB(free)}`, true);
+    if (!confirm(`下载 ${todo.length} 张专辑，大约 ${fmtMB(todoSize)}？\n下载时请保持澄音在前台、连着家里的 Wi-Fi。`)) return;
+    todo.forEach(a => queueDownload(a, a.tracks, true));
+    toast(`开始下载 ${todo.length} 张专辑`);
+  };
+  const ref = $('#pRef', v); if (ref) ref.onclick = () => pcRefresh(true);
+  $('#pUnpair', v).onclick = () => {
+    if (!confirm('解除配对？已经下载到手机的歌不会删除。')) return;
+    pc.token = ''; pc.albums = []; savePc(); render();
+  };
+  pcRefresh();
+}
+
+function drawPcStatus() {
+  const el = $('#pcStatus'); if (!el) return;
+  const n = pc.albums.length;
+  const map = {
+    loading: `<span class="dot wait"></span>正在连接电脑…`,
+    ok: `<span class="dot ok"></span>已连接 ${esc(pc.server)} · ${n} 张专辑`,
+    off: `<span class="dot off"></span>连不上电脑${PCS.err ? '（' + esc(PCS.err) + '）' : ''}：${n ? '下面是上次的列表，' : ''}只能播放已经下载的歌。在家连上 Wi-Fi 后点「刷新」`,
+    idle: '',
+  };
+  el.innerHTML = map[PCS.conn] || '';
+  el.className = 'pc-status ' + PCS.conn;
+}
+
+function renderPcPair(v) {
+  v.innerHTML = `
+    ${PCS.err ? `<div class="pc-status off">${esc(PCS.err)}</div>` : ''}
+    <div class="install"><b>把电脑上的曲库同步到手机</b><br>
+      电脑上的澄音负责导入音乐；在家连 Wi-Fi 时，手机从电脑下载歌，出门离线听，不耗流量。</div>
+    <h3 class="hint" style="margin:6px 4px 8px">第一次设置（只做一次）</h3>
+    <div class="group steps">
+      <div class="item"><div class="l">1. 电脑上打开澄音 →「手机同步」→ 打开开关</div></div>
+      <div class="item"><div class="l">2. 用 iPhone 相机扫电脑上的二维码，在 Safari 里按提示安装并信任「澄音家用根证书」</div></div>
+      <div class="item"><div class="l">3. 回到这里，填电脑上显示的地址和配对码</div></div>
+    </div>
+    <div class="group">
+      <div class="item"><input class="field" id="pHost" inputmode="url" placeholder="地址，例如 192.168.2.151" value="${esc(pc.host)}" autocomplete="off" autocapitalize="off" autocorrect="off"></div>
+      <div class="item"><input class="field" id="pCode" inputmode="numeric" maxlength="6" placeholder="6 位配对码" autocomplete="one-time-code"></div>
+      <div class="item"><button class="btn primary" id="pGo" style="flex:1">配对</button></div>
+    </div>`;
+  $('#pGo', v).onclick = async () => {
+    const host = $('#pHost').value.trim(), code = $('#pCode').value.trim();
+    if (!host || !/^\d{6}$/.test(code)) return toast('请填地址和 6 位配对码', true);
+    const b = $('#pGo'); b.disabled = true; b.textContent = '正在连接…';
+    try {
+      await pcPair(host, code);
+      PCS.err = ''; toast('配对成功');
+      render(); pcRefresh(true);
+    } catch (e) {
+      PCS.err = e.message; render();
+    }
+  };
+}
+
+// 下载时顺便把歌词存下来，离线也有歌词
+async function pcSaveLyrics(t) {
+  try {
+    const r = await pcFetch(`/api/lyrics/${t.pcId}`, {}, 15000);
+    if (!r.ok) return;
+    const j = await r.json();
+    if (j.synced || j.plain) await (await caches.open(TRACK_CACHE)).put(pcLyrKey(t.pcId), new Response(JSON.stringify(j), { headers: { 'Content-Type': 'application/json' } }));
+  } catch { /* 没歌词不影响 */ }
+}
+async function pcLyrics(t) {
+  try {
+    const hit = await (await caches.open(TRACK_CACHE)).match(pcLyrKey(t.pcId));
+    if (hit) return await hit.json();
+  } catch { /* 忽略 */ }
+  if (pc.token) {
+    try {
+      const r = await pcFetch(`/api/lyrics/${t.pcId}`, {}, 6000);
+      if (r.ok) { const j = await r.json(); if (j.synced || j.plain) return j; }
+    } catch { /* 不在家 */ }
+  }
+  return null;
+}
+
 /* ---------------- 页面 ---------------- */
 const S = {
   tab: 'discover',
-  stacks: { discover: [], saved: [], queue: [], settings: [] }, // 每个标签页各自的返回栈
+  stacks: { discover: [], pc: [], saved: [], queue: [], settings: [] }, // 每个标签页各自的返回栈
   get stack() { return this.stacks[this.tab]; },
   set stack(v) { this.stacks[this.tab] = v; },
   radio: { cat: 'lossless', q: '', list: [], loading: false, err: null, token: 0 },
@@ -673,7 +900,7 @@ function render(scrollTop) {
   if (scrollTop) v.scrollTop = 0;
   const page = S.stack[S.stack.length - 1];
   if (page) { header('', true); return renderAlbum(v, page); }
-  ({ discover: renderDiscover, saved: renderSaved, queue: renderQueue, settings: renderSettings })[S.tab](v);
+  ({ discover: renderDiscover, pc: renderPc, saved: renderSaved, queue: renderQueue, settings: renderSettings })[S.tab](v);
 }
 
 /* 发现 */
@@ -848,15 +1075,15 @@ function renderAlbum(v, a) {
   const tr = a.tracks;
   const total = tr.reduce((s, t) => s + (t.duration || 0), 0);
   const size = tr.reduce((s, t) => s + (t.size || 0), 0);
-  const q = tr.some(t => t.hires) ? '24bit FLAC' : tr[0]?.lossless ? 'FLAC 无损' : 'MP3';
-  const lic = a.license ? `<a href="${esc(a.license)}" target="_blank" rel="noopener">${esc(licenseName(a.license))}</a>` : esc(a.note || '');
+  const q = tr.some(t => t.hires) ? '24bit FLAC' : tr[0]?.lossless ? (a.pc ? '16bit FLAC 无损' : 'FLAC 无损') : (tr[0]?.codec || 'MP3');
+  const lic = a.pc ? `你电脑里的曲库 · 原文件 ${esc(a.srcQ || '')}` : a.license ? `<a href="${esc(a.license)}" target="_blank" rel="noopener">${esc(licenseName(a.license))}</a>` : esc(a.note || '');
   v.innerHTML = `
     <div class="album-head">
       <img class="album-cover" src="${esc(a.cover || '')}" onerror="this.style.visibility='hidden'">
       <h2>${esc(a.title)}</h2>
       <div class="artist">${esc(a.artist || '')}</div>
       <div class="facts">${esc([a.date, a.venue].filter(Boolean).join(' · '))}<br>${tr.length} 首 · ${fmtTime(total)} · ${q}${size ? ' · ' + fmtMB(size) : ''}</div>
-      <div class="lic">授权：${lic}</div>
+      <div class="lic">${a.pc ? '' : '授权：'}${lic}</div>
     </div>
     <div class="actions">
       <button class="btn primary" id="ap">${IC.play}播放</button>
@@ -930,6 +1157,7 @@ function refreshDownloadUI() {
   const page = S.stack[S.stack.length - 1];
   if (page && !page.loading) updateAlbumDownload(page);
   if (S.tab === 'saved' && !S.stack.length) render();
+  if (S.tab === 'pc' && !S.stack.length && !refreshDownloadUI.t) refreshDownloadUI.t = setTimeout(() => { refreshDownloadUI.t = 0; if (S.tab === 'pc' && !S.stack.length) render(); }, 800);
 }
 
 /* 已下载 */
@@ -937,7 +1165,7 @@ function renderSaved(v) {
   header('已下载');
   const albums = Object.values(lib.albums).filter(a => a.tracks.some(t => lib.saved[t.url] || t.url in DL.prog));
   if (!albums.length) {
-    v.innerHTML = `<div class="empty"><b>还没有下载</b>在专辑页点「下载」，<br>上车前在家连 Wi-Fi 下好，车上不耗流量、没信号也能听。</div>`;
+    v.innerHTML = `<div class="empty"><b>还没有下载</b>在专辑页点「下载」，或者在「我的曲库」里下载电脑上的歌。<br>上车前在家连 Wi-Fi 下好，车上不耗流量、没信号也能听。</div>`;
     return;
   }
   const n = albums.reduce((s, a) => s + a.tracks.filter(t => lib.saved[t.url]).length, 0);
@@ -996,7 +1224,8 @@ function renderSettings(v) {
       <div class="item"><input class="field" id="jam" placeholder="粘贴 Client ID（可不填）" value="${esc(settings.jamendo)}" autocomplete="off" autocapitalize="off"></div>
     </div>
     <p class="hint">
-      曲库只收录授权明确的免费音乐：archive.org 的 Live Music Archive（乐队允许非商业交换的现场录音）、Netlabels 与古典音乐（Creative Commons / 公有领域），以及 Jamendo（Creative Commons）。歌词来自 LRCLIB。<br>
+      「发现」里只收录授权明确的免费音乐：archive.org 的 Live Music Archive（乐队允许非商业交换的现场录音）、Netlabels 与古典音乐（Creative Commons / 公有领域），以及 Jamendo（Creative Commons）。歌词来自 LRCLIB。<br>
+      「我的曲库」是你自己电脑上澄音 PC 版的曲库，只在家里的 Wi-Fi 下同步。<br>
       在车上：用 CarPlay 的「正在播放」和方向盘按键控制。上车前在家用 Wi-Fi 下载好。<br>
       版本 ${VERSION}</p>`;
   $('#logShow').onclick = () => {
